@@ -1,0 +1,54 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [master]
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-no-ia
+  IMAGE_VERSION: "1.0"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Código: baixa o repositório
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      # 2. Build: gera a imagem Docker com tag de versão
+      - name: Build da imagem Docker
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }} \
+            -t ${{ env.IMAGE_NAME }}:latest \
+            .
+
+      # 3. Imagem Docker: verifica se a imagem foi criada corretamente
+      - name: Verificar imagem criada
+        run: |
+          docker image inspect ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }} > /dev/null
+          docker images ${{ env.IMAGE_NAME }}
+
+      - name: Testar container
+        run: |
+          docker run -d --name teste -p 8000:8000 ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+          for i in $(seq 1 10); do
+            curl -fsS http://localhost:8000/hello && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8000/hello
+          docker rm -f teste
+
+      # 4. Push para Registry: envia a imagem ao Docker Hub
+      - name: Login no Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push da imagem
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+          docker push ${{ env.IMAGE_NAME }}:latest

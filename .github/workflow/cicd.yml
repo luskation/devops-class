@@ -1,5 +1,0 @@
-name: pipeline de bandido 
-
-on: 
-  pull_request
-from: 
