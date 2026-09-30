@@ -5,4 +5,4 @@ app = FastAPI()
 
 @app.get("/hello")
 def say_hello():
-  return {"message": "Hello World"}
+  return {"message": "Hello World 2"}

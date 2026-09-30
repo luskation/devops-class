@@ -6,7 +6,7 @@ on:
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-no-ia
-  IMAGE_VERSION: "1.0"
+  IMAGE_VERSION: "2.0"
 
 jobs:
   build-and-push:
