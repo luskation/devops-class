@@ -1,4 +1,4 @@
-# devops-no-ia
+# devops-class
 
 API em FastAPI com um endpoint `GET /hello`, empacotada em Docker e publicada no Docker Hub por uma pipeline do GitHub Actions a cada push na branch `master`.
 
