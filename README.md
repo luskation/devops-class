@@ -7,10 +7,10 @@ API em FastAPI com um endpoint `GET /hello`, empacotada em Docker e publicada no
 | # | Item | Onde |
 |---|------|------|
 | 1 | Repositório e workflow YAML | https://github.com/luskation/devops-class · [`.github/workflows/devsecops.yml`](.github/workflows/devsecops.yml) |
-| 2 | Execuções da pipeline | https://github.com/luskation/devops-class/actions |
-| 3 | PR bloqueado e relatório da vulnerabilidade | [Demonstração](#demonstração-do-bloqueio-e-da-correção) |
-| 4 | Execução aprovada após a correção | [Demonstração](#demonstração-do-bloqueio-e-da-correção) |
-| 5 | SBOM | Artifact `sbom` de cada execução do workflow |
+| 2 | Execução do pipeline com as ferramentas | [Execução na `master`](https://github.com/luskation/devops-class/actions/runs/40617924311) · [captura](#execução-do-pipeline-na-master) |
+| 3 | PR bloqueado e relatório da vulnerabilidade | [PR #2](https://github.com/luskation/devops-class/pull/2) · [capturas](#pull-request-bloqueado) |
+| 4 | Execução aprovada após a correção | [Execução corrigida](https://github.com/luskation/devops-class/actions/runs/40618937534) · [captura](#execução-aprovada-após-a-correção) |
+| 5 | SBOM | Artifact `sbom` de cada execução · cópia em [`docs/sbom/`](docs/sbom) |
 | 6 | Ferramentas, verificações e regras de bloqueio | Este README |
 
 ## Aplicação
@@ -135,14 +135,44 @@ Total: 5 (HIGH: 5, CRITICAL: 0)
 │                  │ CVE-2026-53539 │      │       │       │ 0.0.30 │ ...
 ```
 
-### Evidências
+## Evidências
 
-| Evidência | Link / captura |
-|-----------|----------------|
-| PR bloqueado | _a preencher_ |
-| Job `Trivy (dependências)` com falha | _a preencher_ |
-| Execução aprovada após a correção | _a preencher_ |
-| Execução na `master` com publicação e artifact `sbom` | _a preencher_ |
+As capturas ficam em [`docs/evidencias/`](docs/evidencias).
+
+| Execução | Commit | Evento | Gitleaks | SonarCloud | Trivy (deps) | Build + Trivy (imagem) + SBOM | Publicação |
+|----------|--------|--------|----------|------------|--------------|-------------------------------|------------|
+| [40617924311](https://github.com/luskation/devops-class/actions/runs/40617924311) | `ebadf03` | push na `master` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [40618677554](https://github.com/luskation/devops-class/actions/runs/40618677554) | `ea88e8e` | PR #2 (`python-multipart==0.0.6`) | ✅ | ✅ | ❌ | ❌ | ⏭️ |
+| [40618937534](https://github.com/luskation/devops-class/actions/runs/40618937534) | `43fd1a6` | PR #2 (`python-multipart==0.0.32`) | ✅ | ✅ | ✅ | ✅ | ⏭️ |
+
+### Execução do pipeline na master
+
+Os quatro jobs de verificação rodam em paralelo e a publicação no Docker Hub só começa depois que todos passam. O Gitleaks não encontrou segredos no histórico.
+
+![Pipeline na master](docs/evidencias/01-pipeline-master.png)
+
+### Pull Request bloqueado
+
+Com `python-multipart==0.0.6`, os checks obrigatórios `Trivy (dependências)` e `Build, Trivy (imagem) e SBOM` falham e o merge fica bloqueado. A publicação não roda em PRs, então a versão vulnerável nunca chega ao registry.
+
+![PR bloqueado](docs/evidencias/02-pr-bloqueado.png)
+
+Trecho do relatório do Trivy apontando as vulnerabilidades HIGH com correção disponível:
+
+![Relatório do Trivy](docs/evidencias/03-trivy-relatorio-vulnerabilidade.png)
+
+### Execução aprovada após a correção
+
+Depois de atualizar para `python-multipart==0.0.32`, todas as verificações passam no mesmo PR, incluindo o Quality Gate do SonarCloud.
+
+![PR aprovado](docs/evidencias/04-pr-aprovado.png)
+
+### SBOM
+
+O artifact `sbom` da [execução na `master`](https://github.com/luskation/devops-class/actions/runs/40617924311) foi copiado para [`docs/sbom/`](docs/sbom), porque artifacts do GitHub Actions expiram:
+
+- [`sbom.zip`](docs/sbom/sbom.zip): SPDX (`sbom.spdx.json`), CycloneDX (`sbom.cyclonedx.json`) e tabela (`sbom.txt`)
+- [`sbom.txt`](docs/sbom/sbom.txt): tabela com nome, versão e tipo de cada componente da imagem
 
 ## Evidências da atividade anterior (Docker CI)
 
