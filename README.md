@@ -1,47 +1,160 @@
 # devops-class
 
-API em FastAPI com um endpoint `GET /hello`, empacotada em Docker e publicada no Docker Hub por uma pipeline do GitHub Actions a cada push na branch `master`.
+API em FastAPI com um endpoint `GET /hello`, empacotada em Docker e publicada no Docker Hub por uma pipeline do GitHub Actions. A pipeline aplica práticas de **DevSecOps** e **shift-left security**: segredos, código, dependências e imagem são verificados em todo Pull Request, antes de qualquer alteração entrar na `master`.
 
 ## Entregáveis
 
 | # | Item | Onde |
 |---|------|------|
-| 1 | Repositório | https://github.com/luskation/devops-no-ia |
-| 2 | Dockerfile | [`Dockerfile`](Dockerfile) |
-| 3 | Pipeline | [`.github/workflows/docker.yml`](.github/workflows/docker.yml) |
-| 4 | Execuções da pipeline | https://github.com/luskation/devops-no-ia/actions |
-| 5 | Imagem no registry | [`luskation/devops-no-ia`](https://hub.docker.com/r/luskation/devops-no-ia/tags) (tags `1.0`, `2.0`, `latest`) |
-| 6 e 7 | Versões 1.0 e 2.0 rodando localmente | [Evidências](#evidências) |
+| 1 | Repositório e workflow YAML | https://github.com/luskation/devops-class · [`.github/workflows/devsecops.yml`](.github/workflows/devsecops.yml) |
+| 2 | Execuções da pipeline | https://github.com/luskation/devops-class/actions |
+| 3 | PR bloqueado e relatório da vulnerabilidade | [Demonstração](#demonstração-do-bloqueio-e-da-correção) |
+| 4 | Execução aprovada após a correção | [Demonstração](#demonstração-do-bloqueio-e-da-correção) |
+| 5 | SBOM | Artifact `sbom` de cada execução do workflow |
+| 6 | Ferramentas, verificações e regras de bloqueio | Este README |
 
 ## Aplicação
 
 - `main.py`: endpoint `GET /hello`.
-- `requirements.txt`: dependências (FastAPI e Uvicorn).
-- `Dockerfile`: imagem baseada em `python:3.11-slim`, servindo a aplicação com Uvicorn na porta **8000**.
+- `tests/test_main.py`: teste unitário do endpoint.
+- `requirements.txt`: dependências de execução, com versões fixas, para o Trivy conseguir analisá-las.
+- `requirements-dev.txt`: dependências de teste (pytest, pytest-cov, httpx).
+- `sonar-project.properties`: configuração do SonarCloud.
+- `Dockerfile`: imagem `python:3.11-slim` endurecida:
+  - aplica as correções de segurança do sistema (`apt-get upgrade`);
+  - remove `pip`, `setuptools`, `wheel` e `ensurepip` depois da instalação, porque não são usados em execução e trazem bibliotecas com CVEs conhecidas;
+  - copia só o `main.py` e roda como usuário sem root.
 
-## Pipeline
+## Pipeline DevSecOps
 
-O workflow `Docker CI` roda a cada push na `master` e executa, em ordem:
+O workflow `DevSecOps CI` roda automaticamente:
 
-1. **Checkout** do código.
-2. **Build** da imagem com duas tags: a versão (`IMAGE_VERSION`) e `latest`.
-3. **Verificação** de que a imagem foi criada.
-4. **Teste**: sobe o container e faz `curl` em `/hello`. Se falhar, a pipeline para antes de publicar.
-5. **Login** no Docker Hub com os secrets `DOCKERHUB_USERNAME` e `DOCKERHUB_TOKEN`.
-6. **Push** das tags de versão e `latest`.
+- na **abertura e atualização de Pull Requests** para a `master` (`opened`, `synchronize`, `reopened`);
+- em **push na `master`**, quando também publica a imagem.
 
-Para gerar uma nova versão, basta alterar `IMAGE_VERSION` no workflow e fazer push.
+```
+ PR / push
+     │
+     ├── gitleaks ───────────┐
+     ├── sonarcloud ─────────┤
+     ├── trivy-deps ─────────┼──► publish (somente push na master)
+     └── build ──────────────┘
+         (build, teste do container,
+          Trivy na imagem, SBOM)
+```
 
-## Evidências
+### Ferramentas e regras de bloqueio
 
-### Execuções da pipeline
+| Job | Ferramenta | O que verifica | Bloqueia quando |
+|-----|-----------|----------------|-----------------|
+| `gitleaks` | Gitleaks | Senhas, tokens, chaves e outros segredos em **todo o histórico** do repositório (`fetch-depth: 0`) | Encontrar qualquer possível segredo |
+| `sonarcloud` | pytest + SonarCloud | Testes unitários, cobertura e análise estática (SAST): bugs, vulnerabilidades, security hotspots, code smells e duplicação | O teste falhar ou o **Quality Gate** do código novo for reprovado (`sonar.qualitygate.wait=true`) |
+| `trivy-deps` | Trivy (`fs`) | Vulnerabilidades nas dependências do `requirements.txt` | Houver CVE **CRITICAL** ou **HIGH** com **correção disponível** (`ignore-unfixed: true`, `exit-code: 1`) |
+| `build` | Docker + Trivy (`image`) | Build da imagem, teste do container (`curl /hello`) e vulnerabilidades do sistema operacional e dos pacotes Python da imagem | O build ou o teste falhar, ou houver CVE **CRITICAL/HIGH com correção** na imagem |
+| `build` | Syft | Gera o SBOM da imagem com todos os componentes e versões | Não bloqueia |
+| `publish` | Docker Hub | Publica a imagem `2.0` e `latest` | Só roda em push na `master` e só se **todos** os jobs acima passarem (`needs`) |
+
+### Relatórios LOW e MEDIUM
+
+O Trivy roda duas vezes em cada alvo:
+
+1. **Relatório** com todas as severidades (`LOW,MEDIUM,HIGH,CRITICAL`) e `exit-code: 0`. Ele aparece no log e é publicado nos artifacts `trivy-deps-report` e `trivy-image-report`. LOW e MEDIUM ficam registrados aqui, sem bloquear.
+2. **Bloqueio** só com `HIGH,CRITICAL`, `ignore-unfixed: true` e `exit-code: 1`.
+
+### SBOM
+
+O Syft gera o SBOM da imagem em três formatos, publicados no artifact **`sbom`** de cada execução:
+
+- `sbom.spdx.json` (SPDX)
+- `sbom.cyclonedx.json` (CycloneDX)
+- `sbom.txt` (tabela legível com nome, versão e tipo de cada componente)
+
+### Publicação segura
+
+Em push na `master`, o job `build` salva a imagem já verificada (`docker save`) e o job `publish` envia **exatamente essa imagem** ao Docker Hub. A imagem publicada é a mesma que passou no teste e no Trivy, sem rebuild. Em Pull Requests o `publish` não roda, então uma versão vulnerável nunca chega ao registry.
+
+## Configuração
+
+### Secrets do repositório
+
+| Secret | Uso |
+|--------|-----|
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Publicação no Docker Hub |
+| `SONAR_TOKEN` | Token do SonarCloud (*My Account → Security*) |
+
+O Gitleaks usa o `GITHUB_TOKEN` automático. Repositórios de conta pessoal não precisam de `GITLEAKS_LICENSE`.
+
+### SonarCloud
+
+1. Importar o repositório em https://sonarcloud.io. O `sonar.organization` e o `sonar.projectKey` em `sonar-project.properties` precisam ser iguais aos do projeto criado.
+2. Em *Administration → Analysis Method*, desativar a **Automatic Analysis**, porque a análise é feita pelo GitHub Actions.
+3. Em *Administration → New Code*, definir o código novo como **Previous version** (ou *Reference branch* = `master`).
+4. Manter o Quality Gate **Sonar way**, que avalia o **código novo**: nenhum problema novo, todos os security hotspots revisados, cobertura ≥ 80% e duplicação ≤ 3%.
+
+### Proteção da branch `master`
+
+Em *Settings → Branches → Add branch ruleset* (ou *Branch protection rule*) para `master`:
+
+- **Require a pull request before merging**
+- **Require status checks to pass**, marcando:
+  - `Gitleaks (segredos)`
+  - `Testes e SonarCloud (SAST)`
+  - `Trivy (dependências)`
+  - `Build, Trivy (imagem) e SBOM`
+- **Require branches to be up to date before merging**
+
+Com isso o botão de merge fica bloqueado enquanto qualquer verificação falhar.
+
+## Demonstração do bloqueio e da correção
+
+A demonstração usa a dependência `python-multipart==0.0.6`, que tem CVEs **HIGH** com correção disponível (por exemplo, [CVE-2024-24762](https://avd.aquasec.com/nvd/cve-2024-24762), corrigida na 0.0.7).
+
+```bash
+# 1. Branch de teste com a dependência vulnerável
+git checkout -b teste/dependencia-vulneravel
+echo "python-multipart==0.0.6" >> requirements.txt
+git commit -am "test: adiciona dependência vulnerável para demonstrar o bloqueio"
+git push -u origin teste/dependencia-vulneravel
+# abrir o PR para a master: Trivy falha e o merge fica bloqueado
+
+# 2. Correção na mesma branch
+sed -i 's/python-multipart==0.0.6/python-multipart==0.0.32/' requirements.txt
+git commit -am "fix: atualiza python-multipart para versão corrigida"
+git push
+# o PR é reavaliado e todas as verificações passam
+```
+
+Trecho esperado do relatório do Trivy no PR bloqueado:
+
+```
+Total: 5 (HIGH: 5, CRITICAL: 0)
+│ python-multipart │ CVE-2024-24762 │ HIGH │ fixed │ 0.0.6 │ 0.0.7  │ ...
+│                  │ CVE-2024-53981 │      │       │       │ 0.0.18 │ ...
+│                  │ CVE-2026-24486 │      │       │       │ 0.0.22 │ ...
+│                  │ CVE-2026-42561 │      │       │       │ 0.0.27 │ ...
+│                  │ CVE-2026-53539 │      │       │       │ 0.0.30 │ ...
+```
+
+### Evidências
+
+| Evidência | Link / captura |
+|-----------|----------------|
+| PR bloqueado | _a preencher_ |
+| Job `Trivy (dependências)` com falha | _a preencher_ |
+| Execução aprovada após a correção | _a preencher_ |
+| Execução na `master` com publicação e artifact `sbom` | _a preencher_ |
+
+## Evidências da atividade anterior (Docker CI)
+
+
+#### Execuções da pipeline
 
 | Execução | Commit | Resultado | Versão publicada |
 |----------|--------|-----------|------------------|
 | [#2](https://github.com/luskation/devops-no-ia/actions/runs/36506478089) | `bc64dee` | ✅ success | 1.0 |
 | [#5](https://github.com/luskation/devops-no-ia/actions/runs/36713886046) | `b3cf3d3` | ✅ success | 2.0 |
 
-### Tags no Docker Hub
+#### Tags no Docker Hub
 
 | Tag | Digest |
 |-----|--------|
@@ -49,7 +162,7 @@ Para gerar uma nova versão, basta alterar `IMAGE_VERSION` no workflow e fazer p
 | `2.0` | `sha256:14fb6f2dfa989e2a848be65db1c3142a52fd0f5ea860b5a6e39694294a61f8b9` |
 | `latest` | igual à `2.0` |
 
-### Execução local das imagens baixadas do registry
+#### Execução local das imagens baixadas do registry
 
 Antes de cada teste, a imagem local foi removida, para garantir que o `docker pull` baixasse a imagem do Docker Hub.
 
@@ -86,7 +199,12 @@ $ curl http://localhost:8080/hello
 ## Como executar
 
 ```bash
+# aplicação
 docker pull luskation/devops-no-ia:2.0
 docker run -p 8080:8000 luskation/devops-no-ia:2.0
 curl http://localhost:8080/hello
+
+# testes
+pip install -r requirements-dev.txt
+pytest --cov=main
 ```
