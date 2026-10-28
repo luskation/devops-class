@@ -1,39 +1,130 @@
-name: Docker CI
+name: DevSecOps CI
 
 on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened]
   push:
     branches: [master]
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-no-ia
   IMAGE_VERSION: "2.0"
+  LOCAL_IMAGE: devops-no-ia:ci
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-push:
+  # 1. Gitleaks: procura segredos em todo o histórico do repositório
+  gitleaks:
+    name: Gitleaks (segredos)
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      # 1. Código: baixa o repositório
+      - name: Checkout do código (histórico completo)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Varredura com Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Testes unitários + SonarCloud (SAST) com Quality Gate
+  sonarcloud:
+    name: Testes e SonarCloud (SAST)
+    runs-on: ubuntu-latest
+    steps:
       - name: Checkout do código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
-      # 2. Build: gera a imagem Docker com tag de versão
+      - name: Configurar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt
+
+      - name: Testes unitários com cobertura
+        run: pytest --cov=main --cov-report=xml
+
+      - name: Análise do SonarCloud
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          # Aguarda o Quality Gate e falha o job se o código novo for reprovado
+          args: >
+            -Dsonar.qualitygate.wait=true
+
+  # 3. Trivy: vulnerabilidades nas dependências do projeto
+  trivy-deps:
+    name: Trivy (dependências)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
+      - name: Relatório completo (LOW/MEDIUM/HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          output: trivy-deps-report.txt
+          exit-code: "0"
+
+      - name: Exibir relatório
+        if: always()
+        run: cat trivy-deps-report.txt
+
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-deps-report
+          path: trivy-deps-report.txt
+
+      - name: Bloqueio (CRITICAL/HIGH com correção disponível)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+  # 4. Build, teste do container, Trivy na imagem e SBOM com Syft
+  build:
+    name: Build, Trivy (imagem) e SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v7
+
       - name: Build da imagem Docker
-        run: |
-          docker build \
-            -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }} \
-            -t ${{ env.IMAGE_NAME }}:latest \
-            .
+        run: docker build -t ${{ env.LOCAL_IMAGE }} .
 
-      # 3. Imagem Docker: verifica se a imagem foi criada corretamente
       - name: Verificar imagem criada
         run: |
-          docker image inspect ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }} > /dev/null
-          docker images ${{ env.IMAGE_NAME }}
+          docker image inspect ${{ env.LOCAL_IMAGE }} > /dev/null
+          docker images ${{ env.LOCAL_IMAGE }}
 
       - name: Testar container
         run: |
-          docker run -d --name teste -p 8000:8000 ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+          docker run -d --name teste -p 8000:8000 ${{ env.LOCAL_IMAGE }}
           for i in $(seq 1 10); do
             curl -fsS http://localhost:8000/hello && break
             sleep 2
@@ -41,9 +132,92 @@ jobs:
           curl -fsS http://localhost:8000/hello
           docker rm -f teste
 
-      # 4. Push para Registry: envia a imagem ao Docker Hub
+      - name: Relatório completo da imagem (LOW/MEDIUM/HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          output: trivy-image-report.txt
+          exit-code: "0"
+
+      - name: Exibir relatório
+        if: always()
+        run: cat trivy-image-report.txt
+
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-image-report
+          path: trivy-image-report.txt
+
+      - name: Bloqueio da imagem (CRITICAL/HIGH com correção disponível)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Instalar Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@v0.24.3
+
+      - name: Gerar SBOM com Syft (SPDX, CycloneDX e tabela)
+        run: |
+          ${{ steps.syft.outputs.cmd }} ${{ env.LOCAL_IMAGE }} \
+            -o spdx-json=sbom.spdx.json \
+            -o cyclonedx-json=sbom.cyclonedx.json \
+            -o table=sbom.txt
+          cat sbom.txt
+
+      - name: Publicar SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            sbom.cyclonedx.json
+            sbom.txt
+
+      # A imagem aprovada é guardada para o job de publicação enviar exatamente o que foi verificado
+      - name: Salvar imagem verificada
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: docker save ${{ env.LOCAL_IMAGE }} -o image.tar
+
+      - name: Enviar imagem para o job de publicação
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+
+  # 5. Publicação: só roda em push na master e depende de todas as verificações
+  publish:
+    name: Publicar no Docker Hub
+    runs-on: ubuntu-latest
+    needs: [gitleaks, sonarcloud, trivy-deps, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - name: Baixar imagem verificada
+        uses: actions/download-artifact@v8
+        with:
+          name: image
+
+      - name: Carregar e marcar imagem
+        run: |
+          docker load -i image.tar
+          docker tag ${{ env.LOCAL_IMAGE }} ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+          docker tag ${{ env.LOCAL_IMAGE }} ${{ env.IMAGE_NAME }}:latest
+
       - name: Login no Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
